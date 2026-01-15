@@ -1,0 +1,7 @@
+{
+  "jira_url": "https://yourcompany.atlassian.net",
+  "username": "bot@yourcompany.com",
+  "api_token": "YOUR_API_TOKEN_HERE",
+  "days_threshold": 5,
+  "dry_run": false
+}
