@@ -328,10 +328,50 @@ Please investigate and fix the issue.
             
             # Create error ticket (only if not in dry_run mode)
             if not dry_run:
+                import platform
+                environment_info = f"Python: {sys.version}\nOS: {platform.system()} {platform.release()}\nPlatform: {platform.platform()}"
+                
+                # Convert text to Atlassian Document Format for Cloud API v3
+                description_adf = {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": error_message
+                                }
+                            ]
+                        }
+                    ]
+                }
+                
+                environment_adf = {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": environment_info
+                                }
+                            ]
+                        }
+                    ]
+                }
+                
                 error_ticket = bot.jira.create_issue(
                     project=config.get('error_project', 'DEV'),
                     summary=error_summary,
+                    description=description_adf,
                     issuetype={'name': 'Bug'},
+                    priority={'name': 'High'},
+                    labels=['auto-bot', 'error'],
+                    environment=environment_adf
                 )
                 print(f"\n✓ Error ticket created: {error_ticket.key}")
             else:
