@@ -30,6 +30,81 @@ def connect_jira(config):
     options = {'server': config['jira_url'], 'rest_api_version': '3'}
     return JIRA(options=options, basic_auth=(config['username'], config['api_token']))
 
+def check_sla_breach(jira, ticket):
+    """
+    Check if both SLA goals are breached (Time to first response AND Time to resolution).
+    
+    Args:
+        jira: JIRA client object
+        ticket: Jira ticket object or ticket key
+        
+    Returns:
+        True if both SLAs are breached, False otherwise
+    """
+    try:
+        # Get ticket key if ticket object is passed
+        ticket_key = ticket.key if hasattr(ticket, 'key') else ticket
+        
+        # Get full ticket with SLA fields
+        full_ticket = jira.issue(ticket_key, fields='*all')
+        
+        print(f"\n  Checking SLA status for {ticket_key}...")
+        
+        # Try to find SLA fields - they vary by Jira configuration
+        sla_fields = []
+        for field_name in dir(full_ticket.fields):
+            if 'customfield' in field_name:
+                field_value = getattr(full_ticket.fields, field_name, None)
+                if field_value and isinstance(field_value, dict):
+                    # Check if this looks like an SLA field
+                    if 'ongoingCycle' in str(field_value) or 'completedCycles' in str(field_value):
+                        sla_fields.append((field_name, field_value))
+        
+        # If we found SLA fields, check for breaches
+        if sla_fields:
+            breached_count = 0
+            total_slas = 0
+            
+            for field_name, field_value in sla_fields:
+                if isinstance(field_value, dict):
+                    # Check ongoing cycle
+                    ongoing = field_value.get('ongoingCycle', {})
+                    if ongoing and ongoing.get('breached') == True:
+                        breached_count += 1
+                        total_slas += 1
+                        print(f"    SLA {field_name}: ✗ BREACHED")
+                    elif ongoing:
+                        total_slas += 1
+                        print(f"    SLA {field_name}: ✓ Not breached")
+                    
+                    # Check completed cycles
+                    completed = field_value.get('completedCycles', [])
+                    for cycle in completed:
+                        if cycle.get('breached') == True:
+                            breached_count += 1
+                            total_slas += 1
+                            print(f"    SLA {field_name} (completed): ✗ BREACHED")
+                        else:
+                            total_slas += 1
+                            print(f"    SLA {field_name} (completed): ✓ Not breached")
+            
+            # Return True only if we have at least 2 SLAs and both are breached
+            if total_slas >= 2:
+                result = breached_count >= 2
+                print(f"  → SLA Status: {'BOTH BREACHED ✗' if result else 'Not both breached ✓'} ({breached_count}/{total_slas})")
+                return result
+            else:
+                print(f"  → Warning: Found only {total_slas} SLA(s), need 2 for breach check")
+                return False
+        else:
+            print(f"  → Warning: No SLA fields found for ticket")
+            return False
+            
+    except Exception as e:
+        print(f"  → Warning: Could not check SLA status: {str(e)}")
+        return False
+
+
 def test_force_close_ticket():
     """Test 1: Force close a specific ticket regardless of days"""
     print("\n" + "="*60)
@@ -298,6 +373,41 @@ def test_create_waiting_ticket():
         import traceback
         traceback.print_exc()
 
+def test_sla_check():
+    """Test 5: Check SLA breach status for a ticket"""
+    print("\n" + "="*60)
+    print("TEST 5: Check SLA Breach Status")
+    print("="*60)
+    
+    config = load_config()
+    jira = connect_jira(config)
+    
+    ticket_key = input("\nEnter ticket key to check SLA (e.g., RT-123): ").strip()
+    
+    if not ticket_key:
+        print("No ticket key provided. Skipping test.")
+        return
+    
+    try:
+        ticket = jira.issue(ticket_key)
+        print(f"\nFound ticket: {ticket.key} - {ticket.fields.summary}")
+        print(f"Current status: {ticket.fields.status.name}")
+        
+        # Check SLA breach
+        is_breached = check_sla_breach(jira, ticket)
+        
+        print("\n" + "="*60)
+        if is_breached:
+            print("RESULT: ✗ Both SLAs are BREACHED - Ticket would be closed by bot")
+        else:
+            print("RESULT: ✓ SLAs not breached - Ticket would NOT be closed")
+        print("="*60)
+        
+    except Exception as e:
+        print(f"\n✗ Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
 def test_invalid_config():
     """Test 4: Test with invalid configuration (should log error)"""
     print("\n" + "="*60)
@@ -446,10 +556,11 @@ def main_menu():
         print("2. Simulate Error & Create Bug Ticket")
         print("3. Create Test Ticket in 'Waiting for customer'")
         print("4. Test Invalid Configuration Error Handling")
-        print("5. Run ALL Tests")
+        print("5. Check SLA Breach Status")
+        print("6. Run ALL Tests")
         print("0. Exit")
         
-        choice = input("\nSelect test (0-5): ").strip()
+        choice = input("\nSelect test (0-6): ").strip()
         
         if choice == '0':
             print("\nExiting...")
@@ -463,6 +574,8 @@ def main_menu():
         elif choice == '4':
             test_invalid_config()
         elif choice == '5':
+            test_sla_check()
+        elif choice == '6':
             print("\n" + "="*60)
             print("RUNNING ALL TESTS")
             print("="*60)
@@ -473,9 +586,11 @@ def main_menu():
             test_error_bug_ticket_creation()
             input("\nPress Enter to continue to next test...")
             test_invalid_config()
+            input("\nPress Enter to continue to next test...")
+            test_sla_check()
             print("\n✓ All tests completed!")
         else:
-            print("Invalid choice. Please select 0-5.")
+            print("Invalid choice. Please select 0-6.")
 
 if __name__ == '__main__':
     try:
