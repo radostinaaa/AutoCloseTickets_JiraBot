@@ -5,13 +5,17 @@
 ## Функционалност
 
 - ✅ Проверява тикети в "Waiting for customer" статус
+- ✅ **Филтрира по проект** (например само RT проект)
+- ✅ **SLA Breach проверка** - затваря само тикети, при които И ДВЕТЕ SLA-та са breach-нати:
+  - Time to first response
+  - Time to resolution
 - ✅ Изчислява работни дни (без събота и неделя)
 - ✅ Автоматично assign-ва тикета на бот акаунта
-- ✅ Затваря тикети след 5+ работни дни
+- ✅ Затваря тикети след 5+ работни дни (конфигурируемо)
 - ✅ Добавя коментар с обяснение преди затваряне
 - ✅ Автоматично се стартира всеки работен ден (опционално)
 - ✅ Robust error handling - не спира при грешки
-- ✅ Автоматично създава Bug тикет при критични грешки
+- ✅ Автоматично създава Bug тикет при критични грешки (с full ADF format)
 - ✅ Записва логове в `log/bot_log.txt`
 
 ## 🛡️ Error Handling & Robustness
@@ -63,7 +67,9 @@ copy config.json.example config.json
   "username": "bot@yourcompany.com",
   "api_token": "YOUR_API_TOKEN_HERE",
   "days_threshold": 5,
-  "dry_run": false
+  "dry_run": false,
+  "project": "RT",
+  "error_project": "RT"
 }
 ```
 
@@ -73,6 +79,8 @@ copy config.json.example config.json
 - `api_token`: API токен (генерирайте от: https://id.atlassian.com/manage-profile/security/api-tokens)
 - `days_threshold`: Брой работни дни преди автоматично затваряне (по подразбиране: 5)
 - `dry_run`: Ако е `true`, само показва тикетите без да ги затваря (за тестване)
+- `project`: **(Ново!)** Проект key за филтриране (например "RT"). Ако липсва - търси във всички проекти
+- `error_project`: **(Ново!)** Проект за създаване на Bug тикети при грешки (по подразбиране: "RT")
 
 ## Употреба
 
@@ -136,32 +144,41 @@ python jira_auto_close.py
 ```
 ============================================================
 Jira Auto-Close Bot - Starting...
-Date: 2026-01-15 09:00:00
+Date: 2026-01-20 09:00:00
 Threshold: 5 working days
+Project: RT
 Mode: LIVE
 ============================================================
-Searching for tickets with status: Waiting for Customer
-Ticket PROJ-123: 7 working days in Waiting for Customer
-Ticket PROJ-456: 6 working days in Waiting for Customer
+Searching for tickets with status: Waiting for customer
+  Filtering by project: RT
+Ticket RT-123: 7 working days in Waiting for customer
+  SLA customfield_10020: ✗ BREACHED
+  SLA customfield_10021: ✗ BREACHED
+  → SLA Status: BOTH BREACHED ✗ (2/2)
+  → Will be closed (SLA breached)
+Ticket RT-456: 6 working days in Waiting for customer
+  SLA customfield_10020: ✓ Not breached
+  SLA customfield_10021: ✗ BREACHED
+  → SLA Status: Not both breached ✓ (1/2)
+  → Skipping (SLA not breached)
 
-Found 2 ticket(s) to close:
-  - PROJ-123: Customer not responding to email request
-    Status changed: 2026-01-03
+Found 1 ticket(s) to close:
+  - RT-123: Customer not responding to email request
+    Status changed: 2026-01-10
     Working days: 7
-  - PROJ-456: Waiting for customer feedback
-    Status changed: 2026-01-06
-    Working days: 6
 
 Closing tickets...
-Assigning PROJ-123 to bot account...
-Closing ticket PROJ-123...
-✓ Ticket PROJ-123 closed successfully
-Assigning PROJ-456 to bot account...
-Closing ticket PROJ-456...
-✓ Ticket PROJ-456 closed successfully
+
+Processing RT-123...
+  Assigning to bot account...
+  ✓ Assigned
+  Adding comment...
+  ✓ Comment added
+  Closing ticket...
+✓ Ticket RT-123 closed successfully
 
 ============================================================
-Summary: Closed 2 out of 2 ticket(s)
+Summary: Closed 1 out of 1 ticket(s)
 ============================================================
 ```
 
@@ -215,9 +232,39 @@ cd AutoCloseTickets_JiraBot
 - Add Comments
 - Transition Issues
 
+### Проблем: "HTTP 410" грешка
+
+Старите версии на Jira библиотеката използват deprecated API endpoint. Ботът вече използва новия `/rest/api/3/search/jql` endpoint директно.
+
+### Проблем: "SLA fields not found"
+
+Ако ботът не намира SLA полета:
+1. Проверете дали в проекта има настроени SLA-та
+2. SLA полетата са customfield-ове и могат да имат различни номера в различни Jira инстанции
+3. Използвайте **Test 5** от test_scripts.py за да проверите SLA статус на конкретен тикет
+
+## Test Scripts
+
+Ботът идва с набор от тестови скриптове за проверка на функционалността:
+
+```bash
+python test_scripts.py
+```
+
+**Налични тестове:**
+
+1. **Force Close Specific Ticket** - Затваря конкретен тикет независимо от SLA или дни
+2. **Simulate Error & Create Bug Ticket** - Тества Bug ticket създаването
+3. **Create Test Ticket in 'Waiting for customer'** - Създава тестов тикет
+4. **Test Invalid Configuration Error Handling** - Тества error handling
+5. **Check SLA Breach Status** - **(Ново!)** Проверява SLA статус на конкретен тикет
+6. **Run ALL Tests** - Пуска всички тестове последователно
+
 ## Персонализация
 
-Ако статусът във вашата Jira е различен от "Waiting for Customer", можете да го промените в кода:
+### Промяна на статус
+
+Ако статусът във вашата Jira е различен от "Waiting for customer", можете да го промените в кода:
 
 ```python
 tickets_to_close = self.find_old_waiting_tickets(
@@ -225,6 +272,31 @@ tickets_to_close = self.find_old_waiting_tickets(
     status_name="Вашия Статус"
 )
 ```
+
+### SLA Логика
+
+По подразбиране ботът затваря тикети само ако **И ДВЕТЕ условия** са изпълнени:
+1. Тикетът е в "Waiting for customer" повече от 5 работни дни
+2. **И двете SLA-та** (Time to first response И Time to resolution) са breach-нати
+
+Ако искате да промените тази логика, модифицирайте `check_sla_breach()` функцията в `jira_auto_close.py`.
+
+### Филтриране по проект
+
+За да ограничите бота само до конкретен проект, добавете в `config.json`:
+```json
+"project": "RT"
+```
+
+За да работи с всички проекти, изтрийте `project` полето или оставете го празно.
+
+## Важни бележки
+
+⚠️ **SLA Проверка**: Ботът затваря тикети САМО ако:
+- Тикетът е в "Waiting for customer" повече от 5 дни (конфигурируемо)
+- **И** и двете SLA-та са breach-нати
+
+Това гарантира, че не се затварят тикети с активни или непробити SLA-та.
 
 ## Лиценз
 
