@@ -50,7 +50,74 @@ class JiraAutoCloseBot:
             
         return working_days
     
-    def find_old_waiting_tickets(self, days_threshold=5, status_name="Waiting for customer"):
+    def check_sla_breach(self, ticket):
+        """
+        Check if both SLA goals are breached (Time to first response AND Time to resolution).
+        
+        Args:
+            ticket: Jira ticket object
+            
+        Returns:
+            True if both SLAs are breached, False otherwise
+        """
+        try:
+            # Get full ticket with SLA fields
+            full_ticket = self.jira.issue(ticket.key, fields='*all')
+            
+            # Try to find SLA fields - they vary by Jira configuration
+            # Common SLA field names
+            sla_fields = []
+            for field_name in dir(full_ticket.fields):
+                if 'customfield' in field_name:
+                    field_value = getattr(full_ticket.fields, field_name, None)
+                    if field_value and isinstance(field_value, dict):
+                        # Check if this looks like an SLA field
+                        if 'ongoingCycle' in str(field_value) or 'completedCycles' in str(field_value):
+                            sla_fields.append((field_name, field_value))
+            
+            # If we found SLA fields, check for breaches
+            if sla_fields:
+                breached_count = 0
+                total_slas = 0
+                
+                for field_name, field_value in sla_fields:
+                    if isinstance(field_value, dict):
+                        # Check ongoing cycle
+                        ongoing = field_value.get('ongoingCycle', {})
+                        if ongoing and ongoing.get('breached') == True:
+                            breached_count += 1
+                            total_slas += 1
+                            print(f"  SLA {field_name}: BREACHED")
+                        elif ongoing:
+                            total_slas += 1
+                            print(f"  SLA {field_name}: Not breached")
+                        
+                        # Check completed cycles
+                        completed = field_value.get('completedCycles', [])
+                        for cycle in completed:
+                            if cycle.get('breached') == True:
+                                breached_count += 1
+                                total_slas += 1
+                                print(f"  SLA {field_name} (completed): BREACHED")
+                            else:
+                                total_slas += 1
+                                print(f"  SLA {field_name} (completed): Not breached")
+                
+                # Return True only if we have at least 2 SLAs and both are breached
+                if total_slas >= 2:
+                    return breached_count >= 2
+                else:
+                    print(f"  Warning: Found only {total_slas} SLA(s), need 2 for breach check")
+                    return False
+            else:
+                print(f"  Warning: No SLA fields found for ticket")
+                return False
+                
+        except Exception as e:
+            print(f"  Warning: Could not check SLA status: {str(e)}")
+            return False
+    
+    def find_old_waiting_tickets(self, days_threshold=5, status_name="Waiting for customer", project=None):
         """
         Find tickets that have been in "Waiting for customer" status 
         for more than the specified working days.
@@ -58,16 +125,41 @@ class JiraAutoCloseBot:
         Args:
             days_threshold: Number of working days threshold (default: 5)
             status_name: Status name to check (default: "Waiting for customer")
+            project: Project key to filter (e.g., "RT"). If None, search all projects.
             
         Returns:
             List of tickets to close
         """
         # JQL query to find tickets in specified status
-        jql_query = f'status = "{status_name}"'
+        if project:
+            jql_query = f'project = "{project}" AND status = "{status_name}"'
+        else:
+            jql_query = f'status = "{status_name}"'
         
         print(f"Searching for tickets with status: {status_name}")
+        if project:
+            print(f"  Filtering by project: {project}")
         try:
-            tickets = self.jira.search_issues(jql_query, maxResults=1000)
+            # Use the new JQL API endpoint directly to avoid HTTP 410 error
+            import requests
+            url = f"{self.jira._options['server']}/rest/api/3/search/jql"
+            headers = {"Accept": "application/json"}
+            auth = (self.jira._session.auth[0], self.jira._session.auth[1])
+            
+            params = {
+                "jql": jql_query,
+                "maxResults": 1000,
+                "fields": "summary,status,assignee,created,comment,customfield_10020,customfield_10021"
+            }
+            
+            response = requests.get(url, headers=headers, auth=auth, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Convert response to JIRA issue objects
+            from jira.resources import Issue
+            tickets = [Issue(self.jira._options, self.jira._session, raw=issue) for issue in data.get('issues', [])]
+            
         except Exception as e:
             print(f"✗ Error searching for tickets: {str(e)}")
             print(f"  Returning empty list and will retry on next run")
@@ -99,12 +191,20 @@ class JiraAutoCloseBot:
                     
                     print(f"Ticket {ticket.key}: {working_days} working days in {status_name}")
                     
-                    if working_days > days_threshold:
+                    # Check SLA breach status
+                    sla_breached = self.check_sla_breach(ticket)
+                    
+                    if working_days > days_threshold and sla_breached:
                         tickets_to_close.append({
                             'ticket': ticket,
                             'days': working_days,
                             'status_changed': last_status_change
                         })
+                        print(f"  → Will be closed (SLA breached)")
+                    elif working_days > days_threshold and not sla_breached:
+                        print(f"  → Skipping (SLA not breached)")
+                    else:
+                        print(f"  → Skipping (not enough days)")
             except Exception as e:
                 print(f"✗ Error processing ticket {ticket.key}: {str(e)}")
                 print(f"  Skipping this ticket and continuing with others...")
@@ -200,18 +300,21 @@ class JiraAutoCloseBot:
             print(f"  This ticket will be skipped, continuing with others...")
             return False
     
-    def run(self, days_threshold=5, dry_run=False):
+    def run(self, days_threshold=5, dry_run=False, project=None):
         """
         Main execution method.
         
         Args:
             days_threshold: Number of working days before auto-closing (default: 5)
             dry_run: If True, only report tickets but don't close them
+            project: Project key to filter (e.g., "RT"). If None, search all projects.
         """
         print("=" * 60)
         print("Jira Auto-Close Bot - Starting...")
         print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Threshold: {days_threshold} working days")
+        if project:
+            print(f"Project: {project}")
         print(f"Mode: {'DRY RUN' if dry_run else 'LIVE'}")
         print("=" * 60)
         
@@ -222,7 +325,7 @@ class JiraAutoCloseBot:
             return
         
         # Find tickets to close
-        tickets_to_close = self.find_old_waiting_tickets(days_threshold)
+        tickets_to_close = self.find_old_waiting_tickets(days_threshold, project=project)
         
         if not tickets_to_close:
             print("\nNo tickets found that meet the criteria.")
@@ -289,10 +392,11 @@ def main():
     # Get parameters from config or use defaults
     days_threshold = config.get('days_threshold', 5)
     dry_run = config.get('dry_run', False)
+    project = config.get('project', None)
     
     # Run bot
     try:
-        bot.run(days_threshold=days_threshold, dry_run=dry_run)
+        bot.run(days_threshold=days_threshold, dry_run=dry_run, project=project)
     except Exception as e:
         print("\n" + "=" * 60)
         print("ERROR: Bot execution failed")
@@ -341,7 +445,7 @@ Please investigate and fix the issue.
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": error_message
+                                    "text": error_description
                                 }
                             ]
                         }
@@ -365,7 +469,7 @@ Please investigate and fix the issue.
                 }
                 
                 error_ticket = bot.jira.create_issue(
-                    project=config.get('error_project', 'DEV'),
+                    project=config.get('error_project', 'RT'),
                     summary=error_summary,
                     description=description_adf,
                     issuetype={'name': 'Bug'},
