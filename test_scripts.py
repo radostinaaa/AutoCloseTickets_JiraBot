@@ -15,7 +15,15 @@ from datetime import datetime, timedelta
 def load_config():
     """Load configuration from config.json"""
     with open('config.json', 'r') as f:
-        return json.load(f)
+        config = json.load(f)
+    
+    # Set default project to RT if not specified
+    if 'project' not in config:
+        config['project'] = 'RT'
+    if 'error_project' not in config:
+        config['error_project'] = 'RT'
+    
+    return config
 
 def connect_jira(config):
     """Connect to Jira"""
@@ -260,7 +268,7 @@ def test_create_waiting_ticket():
         # Create ticket
         print("\nCreating test ticket...")
         issue = jira.create_issue(
-            project='DEV',
+            project=config['project'],
             summary=f'Test ticket - {datetime.now().strftime("%Y-%m-%d %H:%M")}',
             issuetype={'name': 'Task'}
         )
