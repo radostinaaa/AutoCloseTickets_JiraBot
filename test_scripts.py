@@ -74,30 +74,42 @@ def check_sla_breach(jira, ticket):
         
         # If we found SLA fields, check for breaches
         if sla_fields:
-            breached_count = 0
-            total_slas = 0
+            # Look specifically for these two SLAs
+            time_to_first_response_breached = False
+            time_to_resolution_breached = False
+            
+            time_to_first_response_found = False
+            time_to_resolution_found = False
             
             for field_name, sla_name, field_value in sla_fields:
                 if isinstance(field_value, dict):
+                    sla_name_lower = sla_name.lower()
+                    
                     # Check ongoing cycle
                     ongoing = field_value.get('ongoingCycle', {})
                     if ongoing:
                         ongoing = to_dict(ongoing)
-                        if isinstance(ongoing, dict) and ongoing.get('breached') == True:
-                            breached_count += 1
-                            total_slas += 1
-                            elapsed = to_dict(ongoing.get('elapsedTime', {}))
-                            elapsed_friendly = elapsed.get('friendly', 'N/A') if isinstance(elapsed, dict) else 'N/A'
-                            print(f"    SLA {sla_name}: ✗ BREACHED (elapsed: {elapsed_friendly})")
-                        elif isinstance(ongoing, dict):
-                            total_slas += 1
-                            remaining = to_dict(ongoing.get('remainingTime', {}))
-                            remaining_friendly = remaining.get('friendly', 'N/A') if isinstance(remaining, dict) else 'N/A'
-                            print(f"    SLA {sla_name}: ✓ Not breached (remaining: {remaining_friendly})")
                     
                     # Check completed cycles
                     completed = field_value.get('completedCycles', [])
-                    if completed:
+                    
+                    # Determine if this SLA is breached
+                    is_breached = False
+                    
+                    # Ongoing and breached
+                    if ongoing and isinstance(ongoing, dict) and ongoing.get('breached') == True:
+                        is_breached = True
+                        elapsed = to_dict(ongoing.get('elapsedTime', {}))
+                        elapsed_friendly = elapsed.get('friendly', 'N/A') if isinstance(elapsed, dict) else 'N/A'
+                        print(f"    SLA {sla_name}: ✗ BREACHED (elapsed: {elapsed_friendly})")
+                    # Ongoing but not breached
+                    elif ongoing and isinstance(ongoing, dict):
+                        remaining = to_dict(ongoing.get('remainingTime', {}))
+                        remaining_friendly = remaining.get('friendly', 'N/A') if isinstance(remaining, dict) else 'N/A'
+                        print(f"    SLA {sla_name}: ✓ Not breached (remaining: {remaining_friendly})")
+                    # Completed (always count as breached)
+                    elif completed:
+                        is_breached = True
                         for cycle in completed:
                             cycle = to_dict(cycle)
                             if isinstance(cycle, dict):
@@ -105,19 +117,31 @@ def check_sla_breach(jira, ticket):
                                 elapsed_friendly = elapsed.get('friendly', 'N/A') if isinstance(elapsed, dict) else 'N/A'
                                 goal = to_dict(cycle.get('goalDuration', {}))
                                 goal_friendly = goal.get('friendly', 'N/A') if isinstance(goal, dict) else 'N/A'
-                                
-                                # Always count completed cycles as breached
-                                breached_count += 1
-                                total_slas += 1
                                 print(f"    SLA {sla_name} (completed): ✗ BREACHED (elapsed: {elapsed_friendly} / goal: {goal_friendly})")
+                    
+                    # Map to specific SLA types
+                    if 'first response' in sla_name_lower:
+                        time_to_first_response_found = True
+                        if is_breached:
+                            time_to_first_response_breached = True
+                    elif 'resolution' in sla_name_lower and 'close after' not in sla_name_lower:
+                        time_to_resolution_found = True
+                        if is_breached:
+                            time_to_resolution_breached = True
             
-            # Return True only if we have at least 2 SLAs and both are breached
-            if total_slas >= 2:
-                result = breached_count >= 2
-                print(f"  → SLA Status: {'BOTH BREACHED ✗' if result else 'Not both breached ✓'} ({breached_count}/{total_slas})")
-                return result
+            # Check if both required SLAs are found and breached
+            if time_to_first_response_found and time_to_resolution_found:
+                both_breached = time_to_first_response_breached and time_to_resolution_breached
+                breached_count = (1 if time_to_first_response_breached else 0) + (1 if time_to_resolution_breached else 0)
+                print(f"  → SLA Status: {'BOTH BREACHED ✗' if both_breached else 'Not both breached ✓'} ({breached_count}/2)")
+                return both_breached
             else:
-                print(f"  → Warning: Found only {total_slas} SLA(s), need 2 for breach check")
+                missing = []
+                if not time_to_first_response_found:
+                    missing.append("Time to first response")
+                if not time_to_resolution_found:
+                    missing.append("Time to resolution")
+                print(f"  → Warning: Required SLA(s) not found: {', '.join(missing)}")
                 return False
         else:
             print(f"  → Warning: No SLA fields found for ticket")
@@ -431,6 +455,179 @@ def test_sla_check():
         import traceback
         traceback.print_exc()
 
+def test_list_closeable_tickets():
+    """Test 6: List all tickets that can be closed based on SLA logic"""
+    print("\n" + "="*60)
+    print("TEST 6: List All Closeable Tickets")
+    print("="*60)
+    
+    config = load_config()
+    jira = connect_jira(config)
+    
+    days_threshold = config.get('days_threshold', 5)
+    status_name = "Waiting for customer"
+    project = config.get('project', None)
+    
+    print(f"\nSearching for closeable tickets...")
+    print(f"Status: '{status_name}'")
+    if project:
+        print(f"Project: {project}")
+    print(f"Criteria: Both SLAs breached/completed (2/2)")
+    print(f"\nAnalyzing all tickets (no limit)...\n")
+    
+    # Build JQL query
+    if project:
+        jql_query = f'project = "{project}" AND status = "{status_name}"'
+    else:
+        jql_query = f'status = "{status_name}"'
+    
+    try:
+        # Search for ALL tickets (paginated)
+        import requests
+        url = f"{config['jira_url']}/rest/api/3/search/jql"
+        headers = {"Accept": "application/json"}
+        auth = (config['username'], config['api_token'])
+        
+        all_tickets = []
+        start_at = 0
+        max_results = 100
+        
+        while True:
+            params = {
+                "jql": jql_query,
+                "startAt": start_at,
+                "maxResults": max_results,
+                "fields": "summary,status,created"
+            }
+            
+            response = requests.get(url, headers=headers, auth=auth, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            tickets = data.get('issues', [])
+            all_tickets.extend(tickets)
+            
+            total = data.get('total', 0)
+            
+            if start_at + max_results >= total:
+                break
+            
+            start_at += max_results
+        
+        if not all_tickets:
+            print("✓ No tickets found in 'Waiting for customer' status.")
+            return
+        
+        print(f"Found {len(all_tickets)} total ticket(s) in '{status_name}' status")
+        print("Checking SLA status for closeable tickets only...\n")
+        
+        closeable_tickets = []
+        
+        # Check each ticket but only print closeable ones
+        for i, ticket_data in enumerate(all_tickets, 1):
+            ticket_key = ticket_data['key']
+            ticket_summary = ticket_data['fields']['summary']
+            
+            # Show progress every 10 tickets
+            if i % 10 == 0:
+                print(f"Progress: {i}/{len(all_tickets)} tickets checked...")
+            
+            # Check SLA breach silently
+            try:
+                ticket = jira.issue(ticket_key, fields='*all')
+                
+                # Helper function to convert PropertyHolder to dict
+                def to_dict(obj):
+                    if hasattr(obj, '__dict__'):
+                        return obj.__dict__
+                    return obj
+                
+                # Find SLA fields
+                sla_fields = []
+                for field_name in dir(ticket.fields):
+                    if 'customfield' in field_name:
+                        field_value = getattr(ticket.fields, field_name, None)
+                        
+                        if hasattr(field_value, '__dict__'):
+                            field_value = to_dict(field_value)
+                        
+                        if field_value and isinstance(field_value, dict):
+                            if 'ongoingCycle' in str(field_value) or 'completedCycles' in str(field_value):
+                                sla_name = field_value.get('name', field_name)
+                                sla_fields.append((field_name, sla_name, field_value))
+                
+                # Check for breaches - look for specific SLAs
+                time_to_first_response_breached = False
+                time_to_resolution_breached = False
+                
+                time_to_first_response_found = False
+                time_to_resolution_found = False
+                
+                for field_name, sla_name, field_value in sla_fields:
+                    if isinstance(field_value, dict):
+                        sla_name_lower = sla_name.lower()
+                        
+                        # Check ongoing cycle
+                        ongoing = field_value.get('ongoingCycle', {})
+                        if ongoing:
+                            ongoing = to_dict(ongoing)
+                        
+                        # Check completed cycles
+                        completed = field_value.get('completedCycles', [])
+                        
+                        # Determine if this SLA is breached
+                        is_breached = False
+                        
+                        # Ongoing and breached
+                        if ongoing and isinstance(ongoing, dict) and ongoing.get('breached') == True:
+                            is_breached = True
+                        # Completed (always count as breached)
+                        elif completed:
+                            is_breached = True
+                        
+                        # Map to specific SLA types
+                        if 'first response' in sla_name_lower:
+                            time_to_first_response_found = True
+                            if is_breached:
+                                time_to_first_response_breached = True
+                        elif 'resolution' in sla_name_lower and 'close after' not in sla_name_lower:
+                            time_to_resolution_found = True
+                            if is_breached:
+                                time_to_resolution_breached = True
+                
+                # Add to closeable if both required SLAs are found and breached
+                if time_to_first_response_found and time_to_resolution_found:
+                    if time_to_first_response_breached and time_to_resolution_breached:
+                        closeable_tickets.append((ticket_key, ticket_summary))
+                    
+            except Exception as e:
+                # Skip tickets with errors
+                pass
+        
+        # Final Summary
+        print("\n" + "="*80)
+        print("CLOSEABLE TICKETS - READY TO BE CLOSED")
+        print("="*80)
+        
+        if closeable_tickets:
+            print(f"\nFound {len(closeable_tickets)} ticket(s) that meet criteria (2/2 SLA breached/completed):\n")
+            for i, (key, summary) in enumerate(closeable_tickets, 1):
+                print(f"{i}. {key}")
+                print(f"   {summary}")
+                print(f"   URL: {config['jira_url']}/browse/{key}\n")
+        else:
+            print("\n✓ No tickets meet the closure criteria at this time.")
+            print("  All tickets have active SLAs that are not yet breached.\n")
+        
+        print("="*80)
+        print(f"Summary: {len(closeable_tickets)} closeable out of {len(all_tickets)} total in '{status_name}' status")
+        print("="*80)
+        
+    except Exception as e:
+        print(f"\n✗ Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
 def test_invalid_config():
     """Test 4: Test with invalid configuration (should log error)"""
     print("\n" + "="*60)
@@ -580,10 +777,11 @@ def main_menu():
         print("3. Create Test Ticket in 'Waiting for customer'")
         print("4. Test Invalid Configuration Error Handling")
         print("5. Check SLA Breach Status")
-        print("6. Run ALL Tests")
+        print("6. List All Closeable Tickets (by SLA)")
+        print("7. Run ALL Tests")
         print("0. Exit")
         
-        choice = input("\nSelect test (0-6): ").strip()
+        choice = input("\nSelect test (0-7): ").strip()
         
         if choice == '0':
             print("\nExiting...")
@@ -599,6 +797,8 @@ def main_menu():
         elif choice == '5':
             test_sla_check()
         elif choice == '6':
+            test_list_closeable_tickets()
+        elif choice == '7':
             print("\n" + "="*60)
             print("RUNNING ALL TESTS")
             print("="*60)
@@ -611,9 +811,11 @@ def main_menu():
             test_invalid_config()
             input("\nPress Enter to continue to next test...")
             test_sla_check()
+            input("\nPress Enter to continue to next test...")
+            test_list_closeable_tickets()
             print("\n✓ All tests completed!")
         else:
-            print("Invalid choice. Please select 0-6.")
+            print("Invalid choice. Please select 0-7.")
 
 if __name__ == '__main__':
     try:
