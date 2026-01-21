@@ -64,44 +64,67 @@ class JiraAutoCloseBot:
             # Get full ticket with SLA fields
             full_ticket = self.jira.issue(ticket.key, fields='*all')
             
+            # Helper function to convert PropertyHolder to dict
+            def to_dict(obj):
+                if hasattr(obj, '__dict__'):
+                    return obj.__dict__
+                return obj
+            
             # Try to find SLA fields - they vary by Jira configuration
             # Common SLA field names
             sla_fields = []
             for field_name in dir(full_ticket.fields):
                 if 'customfield' in field_name:
                     field_value = getattr(full_ticket.fields, field_name, None)
+                    
+                    # Convert PropertyHolder to dict
+                    if hasattr(field_value, '__dict__'):
+                        field_value = to_dict(field_value)
+                    
                     if field_value and isinstance(field_value, dict):
                         # Check if this looks like an SLA field
                         if 'ongoingCycle' in str(field_value) or 'completedCycles' in str(field_value):
-                            sla_fields.append((field_name, field_value))
+                            sla_name = field_value.get('name', field_name)
+                            sla_fields.append((field_name, sla_name, field_value))
             
             # If we found SLA fields, check for breaches
             if sla_fields:
                 breached_count = 0
                 total_slas = 0
                 
-                for field_name, field_value in sla_fields:
+                for field_name, sla_name, field_value in sla_fields:
                     if isinstance(field_value, dict):
                         # Check ongoing cycle
                         ongoing = field_value.get('ongoingCycle', {})
-                        if ongoing and ongoing.get('breached') == True:
-                            breached_count += 1
-                            total_slas += 1
-                            print(f"  SLA {field_name}: BREACHED")
-                        elif ongoing:
-                            total_slas += 1
-                            print(f"  SLA {field_name}: Not breached")
+                        if ongoing:
+                            ongoing = to_dict(ongoing)
+                            if isinstance(ongoing, dict) and ongoing.get('breached') == True:
+                                breached_count += 1
+                                total_slas += 1
+                                elapsed = to_dict(ongoing.get('elapsedTime', {}))
+                                elapsed_friendly = elapsed.get('friendly', 'N/A') if isinstance(elapsed, dict) else 'N/A'
+                                print(f"  SLA {sla_name}: BREACHED (elapsed: {elapsed_friendly})")
+                            elif isinstance(ongoing, dict):
+                                total_slas += 1
+                                remaining = to_dict(ongoing.get('remainingTime', {}))
+                                remaining_friendly = remaining.get('friendly', 'N/A') if isinstance(remaining, dict) else 'N/A'
+                                print(f"  SLA {sla_name}: Not breached (remaining: {remaining_friendly})")
                         
                         # Check completed cycles
                         completed = field_value.get('completedCycles', [])
-                        for cycle in completed:
-                            if cycle.get('breached') == True:
-                                breached_count += 1
-                                total_slas += 1
-                                print(f"  SLA {field_name} (completed): BREACHED")
-                            else:
-                                total_slas += 1
-                                print(f"  SLA {field_name} (completed): Not breached")
+                        if completed:
+                            for cycle in completed:
+                                cycle = to_dict(cycle)
+                                if isinstance(cycle, dict):
+                                    elapsed = to_dict(cycle.get('elapsedTime', {}))
+                                    elapsed_friendly = elapsed.get('friendly', 'N/A') if isinstance(elapsed, dict) else 'N/A'
+                                    goal = to_dict(cycle.get('goalDuration', {}))
+                                    goal_friendly = goal.get('friendly', 'N/A') if isinstance(goal, dict) else 'N/A'
+                                    
+                                    # Always count completed cycles as breached
+                                    breached_count += 1
+                                    total_slas += 1
+                                    print(f"  SLA {sla_name} (completed): BREACHED (elapsed: {elapsed_friendly} / goal: {goal_friendly})")
                 
                 # Return True only if we have at least 2 SLAs and both are breached
                 if total_slas >= 2:

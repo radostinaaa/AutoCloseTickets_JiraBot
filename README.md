@@ -7,8 +7,9 @@
 - ✅ Проверява тикети в "Waiting for customer" статус
 - ✅ **Филтрира по проект** (например само RT проект)
 - ✅ **SLA Breach проверка** - затваря само тикети, при които И ДВЕТЕ SLA-та са breach-нати:
-  - Time to first response
-  - Time to resolution
+  - Time to first response (ако е completed, винаги се брои като breached)
+  - Time to resolution (ако е ongoing, проверява breach статус)
+  - **Показва детайлна информация**: remaining time, elapsed time, goal duration
 - ✅ Изчислява работни дни (без събота и неделя)
 - ✅ Автоматично assign-ва тикета на бот акаунта
 - ✅ Затваря тикети след 5+ работни дни (конфигурируемо)
@@ -152,20 +153,27 @@ Mode: LIVE
 Searching for tickets with status: Waiting for customer
   Filtering by project: RT
 Ticket RT-123: 7 working days in Waiting for customer
-  SLA customfield_10020: ✗ BREACHED
-  SLA customfield_10021: ✗ BREACHED
+  SLA Time to resolution: ✗ BREACHED (elapsed: 72h)
+  SLA Time to first response (completed): ✗ BREACHED (elapsed: 4h 8m / goal: 16h)
   → SLA Status: BOTH BREACHED ✗ (2/2)
   → Will be closed (SLA breached)
 Ticket RT-456: 6 working days in Waiting for customer
-  SLA customfield_10020: ✓ Not breached
-  SLA customfield_10021: ✗ BREACHED
-  → SLA Status: Not both breached ✓ (1/2)
+  SLA Time to resolution: ✓ Not breached (remaining: 39h 29m)
+  SLA Time to first response (completed): ✗ BREACHED (elapsed: 5h 12m / goal: 16h)
+  → SLA Status: BOTH BREACHED ✗ (2/2)
+  → Will be closed (SLA breached)
+Ticket RT-789: 8 working days in Waiting for customer
+  SLA Time to resolution: ✓ Not breached (remaining: 15h 45m)
+  → SLA Status: Not both breached ✓ (0/1)
   → Skipping (SLA not breached)
 
-Found 1 ticket(s) to close:
+Found 2 ticket(s) to close:
   - RT-123: Customer not responding to email request
     Status changed: 2026-01-10
     Working days: 7
+  - RT-456: No response after multiple attempts
+    Status changed: 2026-01-11
+    Working days: 6
 
 Closing tickets...
 
@@ -177,8 +185,16 @@ Processing RT-123...
   Closing ticket...
 ✓ Ticket RT-123 closed successfully
 
+Processing RT-456...
+  Assigning to bot account...
+  ✓ Assigned
+  Adding comment...
+  ✓ Comment added
+  Closing ticket...
+✓ Ticket RT-456 closed successfully
+
 ============================================================
-Summary: Closed 1 out of 1 ticket(s)
+Summary: Closed 2 out of 2 ticket(s)
 ============================================================
 ```
 
@@ -242,6 +258,11 @@ cd AutoCloseTickets_JiraBot
 1. Проверете дали в проекта има настроени SLA-та
 2. SLA полетата са customfield-ове и могат да имат различни номера в различни Jira инстанции
 3. Използвайте **Test 5** от test_scripts.py за да проверите SLA статус на конкретен тикет
+4. Използвайте `debug_sla.py` скрипта за детайлно изследване на SLA полетата
+
+### Проблем: "PropertyHolder object has no attribute 'get'"
+
+Това е решено в най-новата версия. Ботът автоматично конвертира PropertyHolder обекти в dictionaries.
 
 ## Test Scripts
 
@@ -294,9 +315,15 @@ tickets_to_close = self.find_old_waiting_tickets(
 
 ⚠️ **SLA Проверка**: Ботът затваря тикети САМО ако:
 - Тикетът е в "Waiting for customer" повече от 5 дни (конфигурируемо)
-- **И** и двете SLA-та са breach-нати
+- **И** и двете SLA-та са breach-нати или completed
 
-Това гарантира, че не се затварят тикети с активни или непробити SLA-та.
+**Логика на SLA проверка:**
+- **Ongoing (активни) SLA-та**: Броят се винаги (breached или не)
+- **Completed (завършени) SLA-та**: Винаги се броят като breached (независимо дали са успешно завършени или не)
+- **Необходими минимум 2 SLA-та**: За да се затвори тикет, трябва да има поне 2 SLA и и двете да са breached/completed
+- **Показва времена**: Remaining time (оставащо), elapsed time (изминало), goal duration (целево време)
+
+Това гарантира, че тикетите се затварят само когато имат завършени или нарушени SLA-та.
 
 ## Лиценз
 
