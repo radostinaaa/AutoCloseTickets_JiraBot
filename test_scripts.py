@@ -107,24 +107,31 @@ def check_sla_breach(jira, ticket):
                         remaining = to_dict(ongoing.get('remainingTime', {}))
                         remaining_friendly = remaining.get('friendly', 'N/A') if isinstance(remaining, dict) else 'N/A'
                         print(f"    SLA {sla_name}: ✓ Not breached (remaining: {remaining_friendly})")
-                    # Completed (always count as breached)
+                    # Completed - check if it was breached
                     elif completed:
-                        is_breached = True
                         for cycle in completed:
                             cycle = to_dict(cycle)
                             if isinstance(cycle, dict):
+                                # Check if this completed cycle was breached
+                                cycle_breached = cycle.get('breached', False)
                                 elapsed = to_dict(cycle.get('elapsedTime', {}))
                                 elapsed_friendly = elapsed.get('friendly', 'N/A') if isinstance(elapsed, dict) else 'N/A'
                                 goal = to_dict(cycle.get('goalDuration', {}))
                                 goal_friendly = goal.get('friendly', 'N/A') if isinstance(goal, dict) else 'N/A'
-                                print(f"    SLA {sla_name} (completed): ✗ BREACHED (elapsed: {elapsed_friendly} / goal: {goal_friendly})")
+                                
+                                if cycle_breached:
+                                    is_breached = True
+                                    print(f"    SLA {sla_name} (completed): ✗ BREACHED (elapsed: {elapsed_friendly} / goal: {goal_friendly})")
+                                else:
+                                    print(f"    SLA {sla_name} (completed): ✓ Met (elapsed: {elapsed_friendly} / goal: {goal_friendly})")
                     
                     # Map to specific SLA types
-                    if 'first response' in sla_name_lower:
+                    # Check for exact SLA names to avoid confusion between different SLA types
+                    if 'time to first response' in sla_name_lower and 'it support' not in sla_name_lower:
                         time_to_first_response_found = True
                         if is_breached:
                             time_to_first_response_breached = True
-                    elif 'resolution' in sla_name_lower and 'close after' not in sla_name_lower:
+                    elif 'time to resolution' in sla_name_lower and 'it support' not in sla_name_lower and 'close after' not in sla_name_lower:
                         time_to_resolution_found = True
                         if is_breached:
                             time_to_resolution_breached = True
@@ -581,16 +588,23 @@ def test_list_closeable_tickets():
                         # Ongoing and breached
                         if ongoing and isinstance(ongoing, dict) and ongoing.get('breached') == True:
                             is_breached = True
-                        # Completed (always count as breached)
+                        # Completed - check if it was breached
                         elif completed:
-                            is_breached = True
+                            for cycle in completed:
+                                cycle = to_dict(cycle)
+                                if isinstance(cycle, dict):
+                                    cycle_breached = cycle.get('breached', False)
+                                    if cycle_breached:
+                                        is_breached = True
+                                        break
                         
                         # Map to specific SLA types
-                        if 'first response' in sla_name_lower:
+                        # Check for exact SLA names to avoid confusion between different SLA types
+                        if 'time to first response' in sla_name_lower and 'it support' not in sla_name_lower:
                             time_to_first_response_found = True
                             if is_breached:
                                 time_to_first_response_breached = True
-                        elif 'resolution' in sla_name_lower and 'close after' not in sla_name_lower:
+                        elif 'time to resolution' in sla_name_lower and 'it support' not in sla_name_lower and 'close after' not in sla_name_lower:
                             time_to_resolution_found = True
                             if is_breached:
                                 time_to_resolution_breached = True
@@ -781,7 +795,11 @@ def main_menu():
         print("7. Run ALL Tests")
         print("0. Exit")
         
-        choice = input("\nSelect test (0-7): ").strip()
+        try:
+            choice = input("\nSelect test (0-7): ").strip()
+        except EOFError:
+            print("\n\nNo input available. Exiting menu.")
+            return
         
         if choice == '0':
             print("\nExiting...")
